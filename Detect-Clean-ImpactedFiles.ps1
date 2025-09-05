@@ -78,20 +78,28 @@ function Get-LongPathFiles {
   $longPaths = New-Object System.Collections.Generic.List[string]
   $errors = 0
   
-  # Utiliser robocopy pour enumerer TOUS les fichiers (gere les chemins longs)
-  $tempFile = [System.IO.Path]::GetTempFileName()
   try {
     # Robocopy avec /L (list only) pour enumerer sans copier
-    $null = & robocopy $RootPath "C:\NonExistent" /L /S /NJH /NJS /FP /NC /NDL /TS 2>$null | 
-            Where-Object { $_ -match '^\s+\d+\s+' } | 
-            ForEach-Object { 
-              if ($_ -match '^\s+\d+.*?\d{2}:\d{2}:\d{2}\s+(.+)$') {
-                $longPaths.Add($matches[1].Trim())
-              }
-            }
+    $robocopyOutput = & robocopy $RootPath "C:\NonExistent" /L /S /NJH /NJS /FP /NC /NDL /TS 2>$null
+    
+    foreach ($line in $robocopyOutput) {
+      # Filtrer les lignes contenant des fichiers (commencent par des espaces + taille)
+      if ($line -match '^\s+\d+\s+') {
+        # Extraire le chemin du fichier (après la date/heure)
+        if ($line -match '^\s+\d+.*?\d{2}:\d{2}:\d{2}\s+(.+)$') {
+          $filePath = $matches[1].Trim()
+          # Vérifier que c'est un chemin valide
+          if ($filePath -and $filePath.Length -gt 0 -and -not $filePath.StartsWith('*')) {
+            $longPaths.Add($filePath)
+          }
+        }
+      }
+    }
   }
-  catch { $errors++ }
-  finally { if (Test-Path $tempFile) { Remove-Item $tempFile -Force -ErrorAction SilentlyContinue } }
+  catch { 
+    $errors++
+    Write-Warning "Erreur robocopy: $($_.Exception.Message)"
+  }
   
   Write-Host "Robocopy enumeration: $($longPaths.Count) fichiers trouves"
   return $longPaths.ToArray()
@@ -240,10 +248,19 @@ if ($results.Count -gt 0) {
 # Exports avec gestion memoire optimisee
 if ($results.Count -gt 0) {
   Write-Host "Export des resultats..."
-  # Export TXT par chunks pour economiser la memoire
-  $results | Select-Object -ExpandProperty FullName | Set-Content -Path $txtPath -Encoding UTF8
-  # Export CSV avec flush periodique
-  $results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+  try {
+    # Export TXT - liste des chemins
+    $results | Select-Object -ExpandProperty FullName | Set-Content -Path $txtPath -Encoding UTF8
+    
+    # Export CSV avec toutes les colonnes
+    $results | Select-Object FullName, Length, Attributes, IsReparse, IsSparse, IsZeroLen, LastWrite | 
+               Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    
+    Write-Host "Exports reussis: TXT ($($results.Count) lignes) et CSV"
+  }
+  catch {
+    Write-Error "Erreur lors de l'export: $($_.Exception.Message)"
+  }
   
   # Export rapport par dossier
   $summaryPath = Join-Path $OutputDir "folder_summary_${stamp}.txt"

@@ -257,6 +257,7 @@ if ($results.Count -gt 0) {
                Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8 -Delimiter ';'
     
     Write-Host "Exports reussis: TXT ($($results.Count) lignes) et CSV"
+    Write-Host "Preparation du rapport de resume..."
   }
   catch {
     Write-Error "Erreur lors de l'export: $($_.Exception.Message)"
@@ -264,36 +265,45 @@ if ($results.Count -gt 0) {
   
   # Export rapport par dossier
   $summaryPath = Join-Path $OutputDir "folder_summary_${stamp}.txt"
+  Write-Host "Generation du rapport de resume..."
+  
   # Calculer les statistiques
   $filesHealthy = $tot - $results.Count - $errors
   $filesCorrupt = $results.Count
   $filesTotal = $tot
   
-  $summaryContent = @()
-  $summaryContent += "FICHIERS CORROMPUS DETECTES - $(Get-Date)"
-  $summaryContent += "Racine: $normalizedRoot"
-  $summaryContent += ""
-  $summaryContent += "=== STATISTIQUES ==="
-  $summaryContent += "Total fichiers traites: $filesTotal"
-  $summaryContent += "Fichiers sains: $filesHealthy"
-  $summaryContent += "Fichiers corrompus: $filesCorrupt"
-  $summaryContent += "Erreurs de lecture: $errors"
-  if ($Delete) {
-    $summaryContent += ""
-    $summaryContent += "ATTENTION: TOUS les fichiers corrompus ci-dessous seront SUPPRIMES"
-  }
-  $summaryContent += ""
+  # Generer le contenu par chunks pour eviter les blocages memoire
+  $summaryLines = [System.Collections.Generic.List[string]]::new()
+  $summaryLines.Add("FICHIERS CORROMPUS DETECTES - $(Get-Date)")
+  $summaryLines.Add("Racine: $normalizedRoot")
+  $summaryLines.Add("")
+  $summaryLines.Add("=== STATISTIQUES ===")
+  $summaryLines.Add("Total fichiers traites: $filesTotal")
+  $summaryLines.Add("Fichiers sains: $filesHealthy")
+  $summaryLines.Add("Fichiers corrompus: $filesCorrupt")
+  $summaryLines.Add("Erreurs de lecture: $errors")
   
+  if ($Delete) {
+    $summaryLines.Add("")
+    $summaryLines.Add("ATTENTION: TOUS les fichiers corrompus ci-dessous seront SUPPRIMES")
+  }
+  $summaryLines.Add("")
+  
+  # Limiter l'affichage des fichiers pour eviter les blocages
   if ($folderStats.Count -gt 0) {
-    $summaryContent += "=== PAR DOSSIER ==="
-    $folderStats.GetEnumerator() | Sort-Object Name | ForEach-Object {
-      $summaryContent += "$($_.Key) ($($_.Value.Count) fichiers):"
-      $_.Value.Files | ForEach-Object { $summaryContent += "  $_" }
-      $summaryContent += ""
+    $summaryLines.Add("=== PAR DOSSIER (TOP 20) ===")
+    $folderStats.GetEnumerator() | Sort-Object {$_.Value.Count} -Descending | Select-Object -First 20 | ForEach-Object {
+      $summaryLines.Add("$($_.Key) ($($_.Value.Count) fichiers)")
+      # Limiter a 5 exemples par dossier
+      $_.Value.Files | Select-Object -First 5 | ForEach-Object { $summaryLines.Add("  $_") }
+      if ($_.Value.Files.Count -gt 5) {
+        $summaryLines.Add("  ... et $($_.Value.Files.Count - 5) autres")
+      }
+      $summaryLines.Add("")
     }
   }
   
-  $summaryContent | Set-Content -Path $summaryPath -Encoding UTF8
+  $summaryLines | Set-Content -Path $summaryPath -Encoding UTF8
   Write-Host "Rapport par dossier: $summaryPath"
   Write-Host "Rapports sauvegardes: $($results.Count) fichiers impactes"
 } else {

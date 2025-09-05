@@ -1,0 +1,3 @@
+- Lors de la creation de script powershell, Always use encodage utf-8 without emoji
+- A chaque modification du script mettre à jour le fichier ADR.md
+- Après chaque modification, faire un push vers Github

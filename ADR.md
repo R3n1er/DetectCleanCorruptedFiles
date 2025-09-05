@@ -1,5 +1,38 @@
 # Architecture Decision Records (ADR)
 
+## ADR-002: Correction du blocage après export
+
+**Date**: 2024-01-XX  
+**Statut**: Accepté  
+**Décideur**: Équipe développement  
+
+### Contexte
+Le script se bloquait après l'export des résultats (110748 lignes) lors de la génération du rapport de résumé, probablement dû à un problème de mémoire avec de gros volumes de données.
+
+### Décision
+Optimisation de la génération du rapport de résumé :
+
+1. **Gestion mémoire améliorée**
+   - Utilisation de `List[string]` au lieu d'array pour le contenu
+   - Limitation à TOP 20 dossiers pour éviter surcharge
+   - Limitation à 5 exemples par dossier
+
+2. **Messages de progression**
+   - Ajout de messages informatifs pendant la génération
+   - Indication claire que le script continue après export
+
+### Conséquences
+- ✅ Évite les blocages mémoire sur gros volumes
+- ✅ Rapports plus lisibles (TOP 20 dossiers)
+- ✅ Meilleure visibilité de la progression
+- ✅ Performance améliorée
+
+### Code modifié
+- Section génération rapport résumé : Optimisation mémoire et limitation affichage
+- Messages de progression après export
+
+---
+
 ## ADR-001: Correction des exports de résultats
 
 **Date**: 2024-01-XX  

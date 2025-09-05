@@ -1,9 +1,43 @@
 # Architecture Decision Records (ADR)
 
-## ADR-002: Correction du blocage après export
+## ADR-003: Suppression analyse par dossier pour gros volumes
 
 **Date**: 2024-01-XX  
 **Statut**: Accepté  
+**Décideur**: Équipe développement  
+
+### Contexte
+Le script se bloquait systématiquement après l'export des résultats lors du traitement de gros volumes (110k+ fichiers). Le problème venait de la section "Analyse par dossier" qui consommait trop de mémoire en créant des structures de données complexes pour chaque fichier.
+
+### Décision
+Suppression complète de l'analyse par dossier :
+
+1. **Suppression section analyse par dossier**
+   - Élimination des variables `$folderStats` et `$folderStats2`
+   - Suppression des boucles de traitement par dossier
+   - Suppression de l'affichage des répartitions
+
+2. **Simplification du rapport de résumé**
+   - Rapport basique avec statistiques essentielles uniquement
+   - Pas de détail par dossier pour éviter surcharge mémoire
+
+### Conséquences
+- ✅ Élimination du blocage sur gros volumes
+- ✅ Performance drastiquement améliorée
+- ✅ Continuité vers phase de suppression assurée
+- ❌ Perte du détail par dossier (acceptable pour gros volumes)
+
+### Code modifié
+- Suppression complète section "Analyse par dossier racine"
+- Simplification rapport de résumé
+- Suppression affichages par dossier
+
+---
+
+## ADR-002: Correction du blocage après export
+
+**Date**: 2024-01-XX  
+**Statut**: Déprécié (remplacé par ADR-003)  
 **Décideur**: Équipe développement  
 
 ### Contexte
@@ -22,10 +56,8 @@ Optimisation de la génération du rapport de résumé :
    - Indication claire que le script continue après export
 
 ### Conséquences
-- ✅ Évite les blocages mémoire sur gros volumes
-- ✅ Rapports plus lisibles (TOP 20 dossiers)
+- ❌ N'a pas résolu le problème de blocage
 - ✅ Meilleure visibilité de la progression
-- ✅ Performance améliorée
 
 ### Code modifié
 - Section génération rapport résumé : Optimisation mémoire et limitation affichage

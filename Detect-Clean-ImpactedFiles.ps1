@@ -210,40 +210,7 @@ $scanSw.Stop()
 Write-Progress -Activity "Scan des fichiers" -Completed
 Write-Host "`n"  # termine la ligne du Show-Current
 
-# ---------- Analyse par dossier racine (1er et 2e niveau) ----------
-$folderStats = @{}  # 1er niveau
-$folderStats2 = @{} # 2e niveau
-
-if ($results.Count -gt 0) {
-  foreach ($file in $results) {
-    # Extraire le chemin relatif
-    $relativePath = $file.FullName.Substring($normalizedRoot.Length).TrimStart('\\')
-    $pathParts = $relativePath.Split('\\')
-    
-    # 1er niveau
-    $firstFolder = if ($pathParts.Length -gt 0) { $pathParts[0] } else { "[Racine]" }
-    if (-not $folderStats.ContainsKey($firstFolder)) {
-      $folderStats[$firstFolder] = @{ Count = 0; Files = New-Object System.Collections.Generic.List[string] }
-    }
-    $folderStats[$firstFolder].Count++
-    $folderStats[$firstFolder].Files.Add($file.FullName)
-    
-    # 2e niveau
-    $secondLevel = if ($pathParts.Length -gt 1) {
-      "$($pathParts[0])\$($pathParts[1])"
-    } elseif ($pathParts.Length -eq 1) {
-      "$($pathParts[0])\[Fichiers directs]"
-    } else {
-      "[Racine]"
-    }
-    
-    if (-not $folderStats2.ContainsKey($secondLevel)) {
-      $folderStats2[$secondLevel] = @{ Count = 0; Files = New-Object System.Collections.Generic.List[string] }
-    }
-    $folderStats2[$secondLevel].Count++
-    $folderStats2[$secondLevel].Files.Add($file.FullName)
-  }
-}
+Write-Host "Preparation des exports..."
 
 # Exports avec gestion memoire optimisee
 if ($results.Count -gt 0) {
@@ -263,48 +230,30 @@ if ($results.Count -gt 0) {
     Write-Error "Erreur lors de l'export: $($_.Exception.Message)"
   }
   
-  # Export rapport par dossier
-  $summaryPath = Join-Path $OutputDir "folder_summary_${stamp}.txt"
+  # Export rapport de resume simplifie
+  $summaryPath = Join-Path $OutputDir "summary_${stamp}.txt"
   Write-Host "Generation du rapport de resume..."
   
-  # Calculer les statistiques
   $filesHealthy = $tot - $results.Count - $errors
-  $filesCorrupt = $results.Count
-  $filesTotal = $tot
   
-  # Generer le contenu par chunks pour eviter les blocages memoire
-  $summaryLines = [System.Collections.Generic.List[string]]::new()
-  $summaryLines.Add("FICHIERS CORROMPUS DETECTES - $(Get-Date)")
-  $summaryLines.Add("Racine: $normalizedRoot")
-  $summaryLines.Add("")
-  $summaryLines.Add("=== STATISTIQUES ===")
-  $summaryLines.Add("Total fichiers traites: $filesTotal")
-  $summaryLines.Add("Fichiers sains: $filesHealthy")
-  $summaryLines.Add("Fichiers corrompus: $filesCorrupt")
-  $summaryLines.Add("Erreurs de lecture: $errors")
+  $summaryContent = @(
+    "FICHIERS CORROMPUS DETECTES - $(Get-Date)",
+    "Racine: $normalizedRoot",
+    "",
+    "=== STATISTIQUES ===",
+    "Total fichiers traites: $tot",
+    "Fichiers sains: $filesHealthy",
+    "Fichiers corrompus: $($results.Count)",
+    "Erreurs de lecture: $errors"
+  )
   
   if ($Delete) {
-    $summaryLines.Add("")
-    $summaryLines.Add("ATTENTION: TOUS les fichiers corrompus ci-dessous seront SUPPRIMES")
-  }
-  $summaryLines.Add("")
-  
-  # Limiter l'affichage des fichiers pour eviter les blocages
-  if ($folderStats.Count -gt 0) {
-    $summaryLines.Add("=== PAR DOSSIER (TOP 20) ===")
-    $folderStats.GetEnumerator() | Sort-Object {$_.Value.Count} -Descending | Select-Object -First 20 | ForEach-Object {
-      $summaryLines.Add("$($_.Key) ($($_.Value.Count) fichiers)")
-      # Limiter a 5 exemples par dossier
-      $_.Value.Files | Select-Object -First 5 | ForEach-Object { $summaryLines.Add("  $_") }
-      if ($_.Value.Files.Count -gt 5) {
-        $summaryLines.Add("  ... et $($_.Value.Files.Count - 5) autres")
-      }
-      $summaryLines.Add("")
-    }
+    $summaryContent += ""
+    $summaryContent += "ATTENTION: TOUS les fichiers corrompus seront SUPPRIMES"
   }
   
-  $summaryLines | Set-Content -Path $summaryPath -Encoding UTF8
-  Write-Host "Rapport par dossier: $summaryPath"
+  $summaryContent | Set-Content -Path $summaryPath -Encoding UTF8
+  Write-Host "Rapport de resume: $summaryPath"
   Write-Host "Rapports sauvegardes: $($results.Count) fichiers impactes"
 } else {
   Write-Host "Aucun fichier impacte trouve - pas de rapport genere"
@@ -323,39 +272,7 @@ if ($Delete -and $results.Count -gt 0) {
   Write-Warning "TOUS les fichiers corrompus seront supprimes avec l'option -Delete"
 }
 
-# Rapport par dossier (1er niveau)
-if ($folderStats.Count -gt 0) {
-  Write-Host "`n=== REPARTITION PAR DOSSIER (1er niveau) ==="
-  $folderStats.GetEnumerator() | Sort-Object Name | ForEach-Object {
-    Write-Host ("[DIR] {0}: {1} fichier(s) corrompu(s)" -f $_.Key, $_.Value.Count)
-    
-    # Afficher les 3 premiers chemins pour chaque dossier
-    $displayCount = [Math]::Min(3, $_.Value.Files.Count)
-    for ($i = 0; $i -lt $displayCount; $i++) {
-      Write-Host ("   +-- {0}" -f (Shorten-Path $_.Value.Files[$i] 100))
-    }
-    if ($_.Value.Files.Count -gt 3) {
-      Write-Host ("   +-- ... et {0} autre(s)" -f ($_.Value.Files.Count - 3))
-    }
-  }
-}
 
-# Rapport par dossier (2e niveau)
-if ($folderStats2.Count -gt 0) {
-  Write-Host "`n=== REPARTITION PAR DOSSIER (2e niveau) ==="
-  $folderStats2.GetEnumerator() | Sort-Object Name | ForEach-Object {
-    Write-Host ("[SUB] {0}: {1} fichier(s) corrompu(s)" -f $_.Key, $_.Value.Count)
-    
-    # Afficher les 2 premiers chemins pour chaque sous-dossier
-    $displayCount = [Math]::Min(2, $_.Value.Files.Count)
-    for ($i = 0; $i -lt $displayCount; $i++) {
-      Write-Host ("     +-- {0}" -f (Shorten-Path $_.Value.Files[$i] 90))
-    }
-    if ($_.Value.Files.Count -gt 2) {
-      Write-Host ("     +-- ... et {0} autre(s)" -f ($_.Value.Files.Count - 2))
-    }
-  }
-}
 
 Write-Host ("Rapports        :`n - $txtPath`n - $csvPath`n - $summaryPath`n - $logPath")
 

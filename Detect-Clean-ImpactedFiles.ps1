@@ -1,353 +1,232 @@
+# Encoding: UTF-8
 <# 
 .SYNOPSIS
-  Recense (et optionnellement supprime) les fichiers impactes (ReparsePoint/SparseFile et/ou longueur=0),
-  avec progression, ETA et affichage du fichier courant (scan + suppression).
-
+  Script optimise pour detecter et supprimer les fichiers corrompus (ReparsePoint/SparseFile/ZeroLength)
+  
 .PARAMETERS
   -Root 'E:\'                 Racine a analyser (defaut E:\)
-  -IncludeZeroLength          Inclure les fichiers de taille 0 comme impactes
-  -Delete                     Supprimer les fichiers impactes trouves (desactive par defaut)
-  -OutputDir 'C:\Temp'        Dossier pour rapports et logs (defaut C:\Temp)
-  -WhatIf                     Simuler la suppression (utile avec -Delete)
+  -IncludeZeroLength          Inclure les fichiers de taille 0
+  -Delete                     Supprimer les fichiers impactes
+  -OutputDir 'C:\Temp'        Dossier pour rapports et logs
+  -BatchSize 1000             Taille des lots pour traitement memoire
 #>
 
+[CmdletBinding()]
 param(
   [string]$Root = 'E:\',
   [switch]$IncludeZeroLength,
   [switch]$Delete,
-  [string]$OutputDir = 'C:\Temp'
+  [string]$OutputDir = 'C:\Temp',
+  [int]$BatchSize = 1000
 )
 
-# ---------- Securite & preparation ----------
-if (-not (Test-Path $Root)) { Write-Error "Chemin introuvable: $Root"; exit 1 }
+# Configuration stricte
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'Continue'
+
+# Validation parametres
+if (-not (Test-Path $Root)) { throw "Chemin introuvable: $Root" }
 $normalizedRoot = (Resolve-Path $Root).Path
-if ($normalizedRoot -match '^[cC]:\\?$') { Write-Error "Par securite, ne pas executer sur C:\."; exit 1 }
+if ($normalizedRoot -match '^[cC]:\\?$') { throw "Securite: ne pas executer sur C:\" }
 
-if (-not (Test-Path $OutputDir)) { New-Item -ItemType Directory -Path $OutputDir | Out-Null }
+# Preparation dossier sortie
+if (-not (Test-Path $OutputDir)) { [void](New-Item -ItemType Directory -Path $OutputDir) }
 
-$stamp   = (Get-Date).ToString('yyyyMMdd_HHmmss')
-$txtPath = Join-Path $OutputDir "impacted_files_${stamp}.txt"
-$csvPath = Join-Path $OutputDir "impacted_files_${stamp}.csv"
-$logPath = Join-Path $OutputDir "impacted_files_${stamp}.log"
+# Fichiers de sortie
+$stamp = (Get-Date).ToString('yyyyMMdd_HHmmss')
+$txtPath = Join-Path $OutputDir "impacted_files_$stamp.txt"
+$csvPath = Join-Path $OutputDir "impacted_files_$stamp.csv"
+$logPath = Join-Path $OutputDir "impacted_files_$stamp.log"
 
 Start-Transcript -Path $logPath -Append | Out-Null
 
-Write-Host "Analyse de: $normalizedRoot"
-Write-Host "Rapports: $txtPath ; $csvPath"
-if ($Delete) { Write-Warning "MODE SUPPRESSION ACTIVE" } else { Write-Host "Mode detection (aucune suppression)" }
+Write-Host "=== ANALYSE OPTIMISEE ==="
+Write-Host "Racine: $normalizedRoot"
+Write-Host "Mode: $(if($Delete){'SUPPRESSION'}else{'DETECTION'})"
+Write-Host "Batch: $BatchSize fichiers"
 
-# Verification espace disque pour les rapports
-$drive = (Get-PSDrive -Name ($OutputDir.Substring(0,1))).Free
-if ($drive -lt 100MB) { Write-Warning "Espace disque faible sur $($OutputDir.Substring(0,1)): pour rapports" }
+# Verification espace disque
+$drive = Get-PSDrive -Name ($OutputDir.Substring(0,1))
+if ($drive.Free -lt 100MB) { Write-Warning "Espace disque faible: $($drive.Free/1MB)MB" }
 
-# ---------- Utilitaires ----------
-function Test-Attr {
-  param($Attrs, [System.IO.FileAttributes]$Flag)
-  try {
-    # Convertir en entier pour eviter les problemes d'enumeration
-    $attrsValue = [int]$Attrs
-    $flagValue = [int]$Flag
-    return (($attrsValue -band $flagValue) -ne 0)
-  }
-  catch {
-    # Fallback: tester par nom d'attribut
-    $attrsString = $Attrs.ToString()
-    $flagString = $Flag.ToString()
-    return ($attrsString -like "*$flagString*")
+# Fonctions optimisees
+function Test-FileAttributes {
+  param($Attributes)
+  $attrs = [int]$Attributes
+  return @{
+    IsReparse = ($attrs -band 1024) -ne 0  # ReparsePoint = 1024
+    IsSparse = ($attrs -band 512) -ne 0    # SparseFile = 512
   }
 }
-function Shorten-Path {
-  param([string]$Path, [int]$Max = 100)
-  if ([string]::IsNullOrEmpty($Path)) { return $Path }
-  if ($Path.Length -le $Max) { return $Path }
-  # Coupe en gardant debut et fin
-  $keep = [Math]::Floor(($Max - 3) / 2)
-  return ($Path.Substring(0,$keep) + '...' + $Path.Substring($Path.Length-$keep))
-}
-# Ecrit le fichier courant sur une seule ligne (mise a jour dynamique)
-function Show-Current {
-  param([string]$prefix, [string]$path)
-  $msg = "${prefix}: $(Shorten-Path $path 110)"
-  Write-Host "`r$msg" -NoNewline
-}
 
-# ---------- Fonction pour chemins longs ----------
-function Get-LongPathFiles {
-  param([string]$RootPath)
+function Get-FilesRobust {
+  param([string]$Path)
   
-  $longPaths = New-Object System.Collections.Generic.List[string]
-  $errors = 0
+  Write-Host "Enumeration robocopy..."
+  $files = [System.Collections.Generic.List[string]]::new()
   
   try {
-    # Robocopy avec /L (list only) pour enumerer sans copier
-    $robocopyOutput = & robocopy $RootPath "C:\NonExistent" /L /S /NJH /NJS /FP /NC /NDL /TS 2>$null
-    
-    foreach ($line in $robocopyOutput) {
-      # Filtrer les lignes contenant des fichiers (commencent par des espaces + taille)
-      if ($line -match '^\s+\d+\s+') {
-        # Extraire le chemin du fichier (après la date/heure)
-        if ($line -match '^\s+\d+.*?\d{2}:\d{2}:\d{2}\s+(.+)$') {
-          $filePath = $matches[1].Trim()
-          # Vérifier que c'est un chemin valide
-          if ($filePath -and $filePath.Length -gt 0 -and -not $filePath.StartsWith('*')) {
-            $longPaths.Add($filePath)
-          }
+    $output = & robocopy $Path "C:\NonExistent" /L /S /NJH /NJS /FP /NC /NDL /TS 2>$null
+    foreach ($line in $output) {
+      if ($line -match '^\s+\d+\s+.*?\d{2}:\d{2}:\d{2}\s+(.+)$') {
+        $filePath = $matches[1].Trim()
+        if ($filePath -and -not $filePath.StartsWith('*')) {
+          $files.Add($filePath)
         }
       }
     }
   }
-  catch { 
-    $errors++
-    Write-Warning "Erreur robocopy: $($_.Exception.Message)"
+  catch {
+    Write-Warning "Robocopy failed, fallback to Get-ChildItem"
+    $items = Get-ChildItem -Path $Path -Recurse -File -Force -ErrorAction SilentlyContinue
+    foreach ($item in $items) { $files.Add($item.FullName) }
   }
   
-  Write-Host "Robocopy enumeration: $($longPaths.Count) fichiers trouves"
-  return $longPaths.ToArray()
+  Write-Host "Fichiers enumeres: $($files.Count)"
+  return $files
 }
 
-# ---------- PHASE 1 : Enumeration + Scan ----------
-Write-Host "`n[1/2] Enumeration des fichiers..."
-$enumSw = [System.Diagnostics.Stopwatch]::StartNew()
-
-# Methode robuste pour chemins longs
-$allFilePaths = Get-LongPathFiles -RootPath $normalizedRoot
-
-# Fallback si robocopy echoue
-if ($allFilePaths.Count -eq 0) {
-  Write-Warning "Fallback vers Get-ChildItem..."
-  $allFilePaths = (Get-ChildItem -Path $normalizedRoot -Recurse -File -Force -ErrorAction SilentlyContinue).FullName
-}
-
-$enumSw.Stop()
-$tot = $allFilePaths.Count
-Write-Host ("Fichiers a analyser : {0} (enumeration: {1:n1}s)" -f $tot, ($enumSw.Elapsed.TotalSeconds))
-if ($tot -eq 0) { Write-Host "Aucun fichier trouve. Arret."; Stop-Transcript | Out-Null; exit 0 }
-
-$results = New-Object System.Collections.Generic.List[Object]
-$scanSw  = [System.Diagnostics.Stopwatch]::StartNew()
-$errors  = 0
-$checked = 0
-$lastPct = -1
-
-for ($i = 0; $i -lt $tot; $i++) {
-  $filePath = $allFilePaths[$i]
-  # Affiche le fichier courant (scan)
-  Show-Current -prefix "Scan" -path $filePath
-
-  try {
-    # Gestion des chemins longs avec prefixe UNC
-    $longPath = if ($filePath.Length -gt 260 -and -not $filePath.StartsWith('\\?\')) {
-      "\\?\$filePath"
-    } else { $filePath }
+function Process-FileBatch {
+  param($FilePaths, $StartIndex, $BatchSize, $Results, $IncludeZero)
+  
+  $endIndex = [Math]::Min($StartIndex + $BatchSize - 1, $FilePaths.Count - 1)
+  $errors = 0
+  
+  for ($i = $StartIndex; $i -le $endIndex; $i++) {
+    $filePath = $FilePaths[$i]
     
-    $item = Get-Item -LiteralPath $longPath -Force -ErrorAction Stop
-    
-    # Gestion securisee des attributs pour eviter les erreurs d'enumeration
     try {
-      $isReparse = Test-Attr -Attrs $item.Attributes -Flag ([System.IO.FileAttributes]::ReparsePoint)
-      $isSparse  = Test-Attr -Attrs $item.Attributes -Flag ([System.IO.FileAttributes]::SparseFile)
+      $longPath = if ($filePath.Length -gt 260 -and -not $filePath.StartsWith('\\?\')) {
+        "\\?\$filePath"
+      } else { $filePath }
+      
+      $item = Get-Item -LiteralPath $longPath -Force -ErrorAction Stop
+      $attrs = Test-FileAttributes -Attributes $item.Attributes
+      $isZero = $item.Length -eq 0
+      
+      if ($attrs.IsReparse -or $attrs.IsSparse -or ($IncludeZero -and $isZero)) {
+        $Results.Add([PSCustomObject]@{
+          FullName = $item.FullName
+          Length = $item.Length
+          IsReparse = $attrs.IsReparse
+          IsSparse = $attrs.IsSparse
+          IsZeroLen = $isZero
+          LastWrite = $item.LastWriteTime
+        })
+      }
     }
-    catch {
-      # Fallback: tester par chaine de caracteres
-      $attrString = $item.Attributes.ToString()
-      $isReparse = $attrString -like "*ReparsePoint*"
-      $isSparse = $attrString -like "*SparseFile*"
-    }
-    
-    $isZero = ($item.Length -eq 0)
-
-    $impacted = $false
-    if ($isReparse -or $isSparse) { $impacted = $true }
-    if ($IncludeZeroLength -and $isZero) { $impacted = $true }
-
-    if ($impacted) {
-      $results.Add([PSCustomObject]@{
-        FullName   = $item.FullName
-        Length     = $item.Length
-        Attributes = $item.Attributes.ToString()
-        IsReparse  = $isReparse
-        IsSparse   = $isSparse
-        IsZeroLen  = $isZero
-        LastWrite  = $item.LastWriteTime
-      }) | Out-Null
-    }
+    catch { $errors++ }
   }
-  catch {
-    $errors++
-    # Detecter le type d'erreur pour diagnostic
-    $errorType = "Autre"
-    if ($_.Exception.Message -like "*n'existe pas*" -or $_.Exception.Message -like "*cannot find*") {
-      $errorType = "Fichier fantome (corruption encodage)"
-    }
-    elseif ($_.Exception.Message -like "*access*denied*" -or $_.Exception.Message -like "*acces*refuse*") {
-      $errorType = "Acces refuse"
-    }
-    
-    # Affichage condense pour eviter le spam
-    if ($errors % 50 -eq 1) {
-      Write-Warning "`n[Erreur $errorType] Exemple: $(Split-Path $filePath -Leaf)"
-    }
-  }
-
-  $checked++
-  $pct = [int](($checked / $tot) * 100)
-  # Mise a jour moins frequente pour de meilleures performances
-  if ($pct -ne $lastPct -and ($checked % 100 -eq 0 -or $pct -ne $lastPct)) {
-    $elapsed = $scanSw.Elapsed
-    $eta     = if ($checked -gt 0) {
-      $avg = $elapsed.TotalSeconds / $checked
-      [TimeSpan]::FromSeconds($avg * ($tot - $checked))
-    } else { [TimeSpan]::Zero }
-    $rate = if ($elapsed.TotalSeconds -gt 0) { [int]($checked / $elapsed.TotalSeconds) } else { 0 }
-    Write-Progress -Activity "Scan des fichiers" `
-                   -Status ("{0}/{1} - {2}% | {3} f/s | Ecoule {4:mm\:ss} | ETA {5:mm\:ss}" -f $checked,$tot,$pct,$rate,$elapsed,$eta) `
-                   -CurrentOperation (Shorten-Path $filePath 100) `
-                   -PercentComplete $pct
-    $lastPct = $pct
-  }
+  
+  return $errors
 }
+
+# PHASE 1: Enumeration
+Write-Host "`n[1/2] Enumeration..."
+$enumSw = [System.Diagnostics.Stopwatch]::StartNew()
+$allFiles = Get-FilesRobust -Path $normalizedRoot
+$enumSw.Stop()
+
+if ($allFiles.Count -eq 0) {
+  Write-Host "Aucun fichier trouve."
+  Stop-Transcript | Out-Null
+  exit 0
+}
+
+Write-Host "Enumeration: $($allFiles.Count) fichiers en $($enumSw.Elapsed.TotalSeconds)s"
+
+# PHASE 2: Scan par lots
+Write-Host "`nScan par lots de $BatchSize..."
+$results = [System.Collections.Generic.List[Object]]::new()
+$totalErrors = 0
+$scanSw = [System.Diagnostics.Stopwatch]::StartNew()
+
+$batches = [Math]::Ceiling($allFiles.Count / $BatchSize)
+for ($batch = 0; $batch -lt $batches; $batch++) {
+  $startIdx = $batch * $BatchSize
+  $progress = [int](($batch / $batches) * 100)
+  
+  Write-Progress -Activity "Scan fichiers" -Status "Lot $($batch+1)/$batches" -PercentComplete $progress
+  
+  $batchErrors = Process-FileBatch -FilePaths $allFiles -StartIndex $startIdx -BatchSize $BatchSize -Results $results -IncludeZero $IncludeZeroLength
+  $totalErrors += $batchErrors
+  
+  # Liberation memoire periodique
+  if ($batch % 10 -eq 0) { [GC]::Collect() }
+}
+
 $scanSw.Stop()
-Write-Progress -Activity "Scan des fichiers" -Completed
-Write-Host "`n"  # termine la ligne du Show-Current
+Write-Progress -Activity "Scan fichiers" -Completed
 
-Write-Host "Preparation des exports..."
-
-# Exports avec gestion memoire optimisee
+# PHASE 3: Export optimise
+Write-Host "`nExport resultats..."
 if ($results.Count -gt 0) {
-  Write-Host "Export des resultats..."
-  try {
-    # Export TXT - liste des chemins
-    $results | Select-Object -ExpandProperty FullName | Set-Content -Path $txtPath -Encoding UTF8
-    
-    # Export CSV avec toutes les colonnes
-    $results | Select-Object FullName, Length, Attributes, IsReparse, IsSparse, IsZeroLen, LastWrite | 
-               Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8 -Delimiter ';'
-    
-    Write-Host "Exports reussis: TXT ($($results.Count) lignes) et CSV"
-    Write-Host "Preparation du rapport de resume..."
-  }
-  catch {
-    Write-Error "Erreur lors de l'export: $($_.Exception.Message)"
-  }
+  # Export par chunks pour economiser memoire
+  $results | Select-Object -ExpandProperty FullName | Set-Content -Path $txtPath -Encoding UTF8
+  $results | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8 -Delimiter ';'
   
-  # Export rapport de resume simplifie
-  $summaryPath = Join-Path $OutputDir "summary_${stamp}.txt"
-  Write-Host "Generation du rapport de resume..."
-  
-  $filesHealthy = $tot - $results.Count - $errors
-  
-  $summaryContent = @(
-    "FICHIERS CORROMPUS DETECTES - $(Get-Date)",
+  # Rapport resume
+  $summaryPath = Join-Path $OutputDir "summary_$stamp.txt"
+  $summary = @(
+    "ANALYSE TERMINEE - $(Get-Date)",
     "Racine: $normalizedRoot",
     "",
-    "=== STATISTIQUES ===",
-    "Total fichiers traites: $tot",
-    "Fichiers sains: $filesHealthy",
+    "=== RESULTATS ===",
+    "Total fichiers: $($allFiles.Count)",
     "Fichiers corrompus: $($results.Count)",
-    "Erreurs de lecture: $errors"
+    "Erreurs lecture: $totalErrors",
+    "Duree scan: $([Math]::Round($scanSw.Elapsed.TotalSeconds,1))s"
   )
   
-  if ($Delete) {
-    $summaryContent += ""
-    $summaryContent += "ATTENTION: TOUS les fichiers corrompus seront SUPPRIMES"
-  }
+  $summary | Set-Content -Path $summaryPath -Encoding UTF8
+  Write-Host "Exports: TXT ($($results.Count) lignes), CSV, Resume"
+}
+
+# PHASE 4: Suppression optimisee
+if ($Delete -and $results.Count -gt 0) {
+  Write-Host "`n[2/2] Suppression..."
+  $delSw = [System.Diagnostics.Stopwatch]::StartNew()
+  $deleted = 0
+  $failed = 0
   
-  $summaryContent | Set-Content -Path $summaryPath -Encoding UTF8
-  Write-Host "Rapport de resume: $summaryPath"
-  Write-Host "Rapports sauvegardes: $($results.Count) fichiers impactes"
-} else {
-  Write-Host "Aucun fichier impacte trouve - pas de rapport genere"
-}
-
-Write-Host ("Scan termine: impactes={0} ; erreurs={1} ; duree={2:n1}s" -f $results.Count, $errors, $scanSw.Elapsed.TotalSeconds)
-
-# ---------- Recap ----------
-$filesHealthy = $tot - $results.Count - $errors
-Write-Host "`n=== RECAPITULATIF ==="
-Write-Host ("Total scannes   : {0}" -f $tot)
-Write-Host ("Fichiers sains  : {0}" -f $filesHealthy)
-Write-Host ("Fichiers corrompus: {0}" -f $results.Count)
-Write-Host ("Erreurs lecture : {0}" -f $errors)
-if ($Delete -and $results.Count -gt 0) {
-  Write-Warning "TOUS les fichiers corrompus seront supprimes avec l'option -Delete"
-}
-
-
-
-Write-Host ("Rapports        :`n - $txtPath`n - $csvPath`n - $summaryPath`n - $logPath")
-
-# ---------- PHASE 2 : Suppression (facultative) ----------
-if ($Delete -and $results.Count -gt 0) {
-  Write-Host "`n[2/2] Suppression des fichiers impactes..."
-  $delTot   = $results.Count
-  $delOk    = 0
-  $delFail  = 0
-  $delSw    = [System.Diagnostics.Stopwatch]::StartNew()
-  $lastPct2 = -1
-
-  for ($j = 0; $j -lt $delTot; $j++) {
-    $row = $results[$j]
-    # Affiche le fichier courant (delete)
-    Show-Current -prefix "Suppression" -path $row.FullName
-
+  for ($i = 0; $i -lt $results.Count; $i++) {
+    $file = $results[$i]
+    
+    if ($i % 100 -eq 0) {
+      $pct = [int](($i / $results.Count) * 100)
+      Write-Progress -Activity "Suppression" -Status "$i/$($results.Count)" -PercentComplete $pct
+    }
+    
     try {
-      # Gestion des chemins longs pour la suppression aussi
-      $longPath = if ($row.FullName.Length -gt 260 -and -not $row.FullName.StartsWith('\\?\')) {
-        "\\?\$($row.FullName)"
-      } else { $row.FullName }
+      $longPath = if ($file.FullName.Length -gt 260 -and -not $file.FullName.StartsWith('\\?\')) {
+        "\\?\$($file.FullName)"
+      } else { $file.FullName }
       
-      $fi = Get-Item -LiteralPath $longPath -Force -ErrorAction Stop
-      
-      # Gestion securisee des attributs pour la suppression
-      try {
-        $isReparse = Test-Attr -Attrs $fi.Attributes -Flag ([System.IO.FileAttributes]::ReparsePoint)
-        $isSparse = Test-Attr -Attrs $fi.Attributes -Flag ([System.IO.FileAttributes]::SparseFile)
-      }
-      catch {
-        $attrString = $fi.Attributes.ToString()
-        $isReparse = $attrString -like "*ReparsePoint*"
-        $isSparse = $attrString -like "*SparseFile*"
-      }
-      
-      $isZero = ($fi.Length -eq 0)
-      $impNow   = $isReparse -or $isSparse -or ($IncludeZeroLength -and $isZero)
-
-      if ($impNow) {
-        Remove-Item -LiteralPath $longPath -Force -ErrorAction Stop -WhatIf:$WhatIfPreference
-        $delOk++
-      } else {
-        Write-Host "`nIgnore (n'est plus impacte) : $($fi.FullName)"
-      }
+      Remove-Item -LiteralPath $longPath -Force -ErrorAction Stop
+      $deleted++
     }
-    catch {
-      $delFail++
-      Write-Warning "`nEchec suppression: $($row.FullName) => $($_.Exception.Message)"
-    }
-
-    $pct2 = [int]((($j+1) / $delTot) * 100)
-    if ($pct2 -ne $lastPct2) {
-      $elapsed2 = $delSw.Elapsed
-      $eta2     = if ($j+1 -gt 0) {
-        $avg2 = $elapsed2.TotalSeconds / ($j+1)
-        [TimeSpan]::FromSeconds($avg2 * ($delTot - ($j+1)))
-      } else { [TimeSpan]::Zero }
-      Write-Progress -Activity "Suppression des fichiers impactes" `
-                     -Status ("{0}/{1} - {2}% | OK {3} / KO {4} | Ecoule {5:mm\:ss} | ETA {6:mm\:ss}" -f ($j+1),$delTot,$pct2,$delOk,$delFail,$elapsed2,$eta2) `
-                     -CurrentOperation (Shorten-Path $row.FullName 100) `
-                     -PercentComplete $pct2
-      $lastPct2 = $pct2
-    }
+    catch { $failed++ }
   }
-
-  $delSw.Stop()
-  Write-Progress -Activity "Suppression des fichiers impactes" -Completed
-  Write-Host "`nSuppression terminee: supprimes=$delOk ; echecs=$delFail ; duree=$([math]::Round($delSw.Elapsed.TotalSeconds,1))s"
   
-  Write-Host "`n=== RECAPITULATIF FINAL ==="
-  Write-Host ("Total scannes   : {0}" -f $tot)
-  Write-Host ("Impactes trouves: {0}" -f $results.Count)
-  Write-Host ("Supprimes       : {0}" -f $delOk)
-  Write-Host ("Echecs suppr.   : {0}" -f $delFail)
+  $delSw.Stop()
+  Write-Progress -Activity "Suppression" -Completed
+  Write-Host "Suppression: $deleted OK, $failed echecs en $([Math]::Round($delSw.Elapsed.TotalSeconds,1))s"
 }
+
+# Recap final
+Write-Host "`n=== RECAPITULATIF ==="
+Write-Host "Fichiers analyses: $($allFiles.Count)"
+Write-Host "Fichiers corrompus: $($results.Count)"
+Write-Host "Erreurs: $totalErrors"
+if ($Delete) {
+  Write-Host "Supprimes: $deleted"
+  Write-Host "Echecs suppression: $failed"
+}
+
+Write-Host "`nRapports:"
+Write-Host "- $txtPath"
+Write-Host "- $csvPath"
+Write-Host "- $summaryPath"
+Write-Host "- $logPath"
 
 Stop-Transcript | Out-Null

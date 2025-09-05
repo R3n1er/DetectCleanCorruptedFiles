@@ -1,9 +1,62 @@
 # Architecture Decision Records (ADR)
 
-## ADR-003: Suppression analyse par dossier pour gros volumes
+## ADR-004: Refactorisation complète pour optimisation performance
 
 **Date**: 2024-01-XX  
 **Statut**: Accepté  
+**Décideur**: Équipe développement  
+
+### Contexte
+Suite aux problèmes de blocage et de performance sur gros volumes (110k+ fichiers), une refactorisation complète était nécessaire pour optimiser la rapidité, fluidité et éviter les bugs de lenteur/mémoire.
+
+### Décision
+Refactorisation majeure avec optimisations critiques :
+
+1. **Traitement par lots (BatchSize)**
+   - Paramètre configurable (défaut: 1000 fichiers/lot)
+   - Libération mémoire périodique avec `[GC]::Collect()`
+   - Évite l'accumulation mémoire sur gros volumes
+
+2. **Fonctions optimisées**
+   - `Test-FileAttributes`: Test direct des bits d'attributs (1024=ReparsePoint, 512=SparseFile)
+   - `Get-FilesRobust`: Énumération robocopy optimisée avec fallback
+   - `Process-FileBatch`: Traitement par chunks avec gestion d'erreur
+
+3. **Gestion mémoire améliorée**
+   - Utilisation de `List[T]` au lieu d'arrays
+   - Suppression des fonctions inutiles (Show-Current, Shorten-Path)
+   - Configuration stricte avec `$ErrorActionPreference = 'Stop'`
+
+4. **Simplification du code**
+   - Suppression des affichages temps réel gourmands
+   - Élimination des calculs ETA complexes
+   - Progress bars simplifiées (tous les 100 fichiers)
+
+5. **Export optimisé**
+   - Export direct sans transformations multiples
+   - Rapport de résumé minimal
+   - Gestion d'erreur robuste
+
+### Conséquences
+- ✅ Performance drastiquement améliorée (traitement par lots)
+- ✅ Consommation mémoire maîtrisée
+- ✅ Plus de blocages sur gros volumes
+- ✅ Code plus maintenable et lisible
+- ✅ Suppression optimisée (pas de re-vérification)
+- ❌ Moins de détails visuels pendant l'exécution (acceptable)
+
+### Code modifié
+- Refactorisation complète du script
+- Nouvelles fonctions optimisées
+- Traitement par lots avec libération mémoire
+- Simplification des exports et rapports
+
+---
+
+## ADR-003: Suppression analyse par dossier pour gros volumes
+
+**Date**: 2024-01-XX  
+**Statut**: Intégré dans ADR-004  
 **Décideur**: Équipe développement  
 
 ### Contexte
@@ -27,17 +80,12 @@ Suppression complète de l'analyse par dossier :
 - ✅ Continuité vers phase de suppression assurée
 - ❌ Perte du détail par dossier (acceptable pour gros volumes)
 
-### Code modifié
-- Suppression complète section "Analyse par dossier racine"
-- Simplification rapport de résumé
-- Suppression affichages par dossier
-
 ---
 
 ## ADR-002: Correction du blocage après export
 
 **Date**: 2024-01-XX  
-**Statut**: Déprécié (remplacé par ADR-003)  
+**Statut**: Déprécié (remplacé par ADR-004)  
 **Décideur**: Équipe développement  
 
 ### Contexte
@@ -59,16 +107,12 @@ Optimisation de la génération du rapport de résumé :
 - ❌ N'a pas résolu le problème de blocage
 - ✅ Meilleure visibilité de la progression
 
-### Code modifié
-- Section génération rapport résumé : Optimisation mémoire et limitation affichage
-- Messages de progression après export
-
 ---
 
 ## ADR-001: Correction des exports de résultats
 
 **Date**: 2024-01-XX  
-**Statut**: Accepté  
+**Statut**: Intégré dans ADR-004  
 **Décideur**: Équipe développement  
 
 ### Contexte
@@ -92,10 +136,6 @@ Amélioration de la fonction `Get-LongPathFiles` et des exports :
 - ✅ Meilleure gestion des chemins longs Windows
 - ✅ Rapports CSV correctement formatés
 - ✅ Robustesse accrue face aux erreurs
-
-### Code modifié
-- `Get-LongPathFiles()` : Amélioration parsing robocopy
-- Section exports : Ajout délimiteur CSV et gestion erreurs
 
 ---
 

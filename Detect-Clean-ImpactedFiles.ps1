@@ -17,7 +17,8 @@ param(
   [switch]$IncludeZeroLength,
   [switch]$Delete,
   [string]$OutputDir = 'C:\Temp',
-  [int]$BatchSize = 1000
+  [int]$BatchSize = 1000,
+  [switch]$ForceDetection  # Force la détection sans validation de corruption
 )
 
 # Configuration stricte
@@ -43,6 +44,7 @@ Start-Transcript -Path $logPath -Append | Out-Null
 Write-Host "=== ANALYSE OPTIMISEE ==="
 Write-Host "Racine: $normalizedRoot"
 Write-Host "Mode: $(if($Delete){'SUPPRESSION'}else{'DETECTION'})"
+Write-Host "Validation: $(if($ForceDetection){'DESACTIVEE (tous attributs)'}else{'ACTIVEE (corruption réelle)'})"
 Write-Host "Batch: $BatchSize fichiers"
 
 # Verification espace disque
@@ -57,6 +59,36 @@ function Test-FileAttributes {
     IsReparse = ($attrs -band 1024) -ne 0  # ReparsePoint = 1024
     IsSparse = ($attrs -band 512) -ne 0    # SparseFile = 512
   }
+}
+
+function Test-FileCorruption {
+  param($FilePath, $IsReparse, $IsSparse, $IsZero)
+  
+  # Si c'est juste un fichier vide, pas forcément corrompu
+  if ($IsZero -and -not $IsReparse -and -not $IsSparse) {
+    return $false  # Fichier vide normal
+  }
+  
+  # Tester si le fichier est réellement accessible/lisible
+  try {
+    # Test de lecture basique pour vérifier la corruption
+    $stream = [System.IO.File]::OpenRead($FilePath)
+    $buffer = New-Object byte[] 1024
+    $bytesRead = $stream.Read($buffer, 0, 1024)
+    $stream.Close()
+    
+    # Si ReparsePoint ou SparseFile mais lisible, probablement OK
+    if (($IsReparse -or $IsSparse) -and $bytesRead -ge 0) {
+      return $false  # Fichier avec attributs spéciaux mais lisible
+    }
+  }
+  catch {
+    # Erreur de lecture = vraiment corrompu
+    return $true
+  }
+  
+  # Par défaut, considérer comme corrompu si attributs suspects
+  return ($IsReparse -or $IsSparse)
 }
 
 function Get-FilesRobust {
@@ -87,7 +119,7 @@ function Get-FilesRobust {
 }
 
 function Process-FileBatch {
-  param($FilePaths, $StartIndex, $BatchSize, $Results, $IncludeZero)
+  param($FilePaths, $StartIndex, $BatchSize, $Results, $IncludeZero, $ForceDetection)
   
   $endIndex = [Math]::Min($StartIndex + $BatchSize - 1, $FilePaths.Count - 1)
   $errors = 0
@@ -104,7 +136,19 @@ function Process-FileBatch {
       $attrs = Test-FileAttributes -Attributes $item.Attributes
       $isZero = $item.Length -eq 0
       
+      # Validation de corruption réelle
+      $isCorrupted = $false
       if ($attrs.IsReparse -or $attrs.IsSparse -or ($IncludeZero -and $isZero)) {
+        if ($ForceDetection) {
+          # Mode force : tous les fichiers avec attributs suspects
+          $isCorrupted = $true
+        } else {
+          # Mode validation : vérifier la corruption réelle
+          $isCorrupted = Test-FileCorruption -FilePath $item.FullName -IsReparse $attrs.IsReparse -IsSparse $attrs.IsSparse -IsZero $isZero
+        }
+      }
+      
+      if ($isCorrupted) {
         $Results.Add([PSCustomObject]@{
           FullName = $item.FullName
           Length = $item.Length
@@ -112,6 +156,7 @@ function Process-FileBatch {
           IsSparse = $attrs.IsSparse
           IsZeroLen = $isZero
           LastWrite = $item.LastWriteTime
+          Reason = $(if($attrs.IsReparse){'ReparsePoint'}elseif($attrs.IsSparse){'SparseFile'}elseif($isZero){'ZeroLength'}else{'Unknown'})
         })
       }
     }
@@ -148,7 +193,7 @@ for ($batch = 0; $batch -lt $batches; $batch++) {
   
   Write-Progress -Activity "Scan fichiers" -Status "Lot $($batch+1)/$batches" -PercentComplete $progress
   
-  $batchErrors = Process-FileBatch -FilePaths $allFiles -StartIndex $startIdx -BatchSize $BatchSize -Results $results -IncludeZero $IncludeZeroLength
+  $batchErrors = Process-FileBatch -FilePaths $allFiles -StartIndex $startIdx -BatchSize $BatchSize -Results $results -IncludeZero $IncludeZeroLength -ForceDetection $ForceDetection
   $totalErrors += $batchErrors
   
   # Liberation memoire periodique

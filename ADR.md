@@ -1,5 +1,57 @@
 # Architecture Decision Records (ADR)
 
+## ADR-005: Validation de corruption réelle vs attributs spéciaux
+
+**Date**: 2024-01-XX  
+**Statut**: Accepté  
+**Décideur**: Équipe développement  
+
+### Contexte
+Les fichiers détectés comme "corrompus" étaient en réalité accessibles et lisibles. Le script détectait les attributs ReparsePoint et SparseFile comme corruption, alors que ce sont souvent des attributs normaux (liens symboliques, fichiers optimisés, etc.).
+
+### Décision
+Ajout d'une validation de corruption réelle :
+
+1. **Fonction Test-FileCorruption**
+   - Test de lecture basique pour vérifier l'accessibilité
+   - Validation que les fichiers avec attributs spéciaux sont réellement corrompus
+   - Distinction entre fichiers vides normaux et corrompus
+
+2. **Paramètre ForceDetection**
+   - `-ForceDetection` : Mode ancien (tous attributs suspects)
+   - Mode par défaut : Validation de corruption réelle
+   - Permet de choisir le comportement selon le besoin
+
+3. **Logique de validation**
+   - Fichiers vides seuls : Non considérés comme corrompus
+   - ReparsePoint/SparseFile lisibles : Non corrompus
+   - Erreur de lecture : Vraiment corrompu
+   - Ajout colonne "Reason" dans les exports
+
+### Conséquences
+- ✅ Évite la suppression de fichiers normaux avec attributs spéciaux
+- ✅ Détection plus précise de la corruption réelle
+- ✅ Flexibilité avec paramètre ForceDetection
+- ✅ Meilleure traçabilité avec colonne Reason
+- ⚠️ Légèrement plus lent (test de lecture)
+
+### Utilisation
+```powershell
+# Mode par défaut : validation de corruption réelle
+.\Detect-Clean-ImpactedFiles.ps1 -Root "E:\"
+
+# Mode force : tous attributs suspects (ancien comportement)
+.\Detect-Clean-ImpactedFiles.ps1 -Root "E:\" -ForceDetection
+```
+
+### Code modifié
+- Nouvelle fonction `Test-FileCorruption`
+- Paramètre `-ForceDetection` ajouté
+- Logique de validation dans `Process-FileBatch`
+- Colonne "Reason" dans les exports
+
+---
+
 ## ADR-004: Refactorisation complète pour optimisation performance
 
 **Date**: 2024-01-XX  
